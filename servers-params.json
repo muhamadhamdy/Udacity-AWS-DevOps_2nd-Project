@@ -1,0 +1,34 @@
+[
+    {
+        "ParameterKey": "EnvironmentName",
+        "ParameterValue": "M-Hamdy-Project"
+    },
+    {
+        "ParameterKey": "SourceIP",
+        "ParameterValue": "102.189.40.157/32"
+    },
+    {
+        "ParameterKey": "S3BucketName",
+        "ParameterValue": "m-hamdy-data-s3-002"
+    },
+    {
+        "ParameterKey": "WebAppName",
+        "ParameterValue": "webapp"
+    },
+    {
+        "ParameterKey": "BastionSSHKey",
+        "ParameterValue": "udacity-project-key"
+    },
+    {
+        "ParameterKey": "AWSRegion",
+        "ParameterValue": "us-east-1"
+    },
+    {
+        "ParameterKey": "AMICode",
+        "ParameterValue": "ami-0574da719dca65348"
+    },
+    {
+        "ParameterKey": "AMIType",
+        "ParameterValue": "t3.medium"
+    }
+]

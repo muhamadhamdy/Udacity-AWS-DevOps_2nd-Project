@@ -1,0 +1,331 @@
+Description: >
+  Mohamed Hamdy / Udacity 2023
+  CloudFormation file to create Bastion servers, EC2 Servers and security groups 
+  for deploying a high-availability web app using CloudFormation.
+
+Parameters:
+  EnvironmentName:
+    Description: Name to be prefixed to all resources
+    Type: String
+
+  SourceIP:
+    Description: Ip address to allow SSH access to the bastion host
+    Type: String
+
+  S3BucketName:
+    Description: Bucket which ssh key placed
+    Type: String
+
+  WebAppName:
+    Description: web app zip file name
+    Type: String
+    
+  BastionSSHKey:
+    Description: KeyName to access bastion host
+    Type: "AWS::EC2::KeyPair::KeyName"
+    
+  AWSRegion:
+    Description: AWS default region
+    Type: String
+
+  AMICode:
+    Description: AMI code
+    Type: String
+  
+  AMIType:
+    Description: AMI type
+    Type: String
+
+Resources:
+  WebServerLBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http traffic to LB
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${EnvironmentName}-WALBSG"
+
+  WebServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to ec2 and SHH access
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Join ["", [!GetAtt BastionServer1.PrivateIp, !Sub "/32"]]
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Join ["", [!GetAtt BastionServer2.PrivateIp, !Sub "/32"]]
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-WebServer-SG
+
+  WebServerLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn:
+      - BastionIamInstanceProfile
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install unzip awscli -y
+          apt-get install apache2 -y
+          systemctl start apache2.service
+          cd /var/www/html
+          sudo rm index.html
+          sudo aws s3 cp s3://${S3BucketName}/app-data/${WebAppName}.zip .
+          sudo unzip -o ${WebAppName}.zip
+          systemctl restart apache2.service
+      IamInstanceProfile: !Ref BastionIamInstanceProfile
+        #Fn::ImportValue: !Sub "${EnvironmentName}-IAM-NAME"
+      SecurityGroups:
+        - Ref: "WebServerSG"
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: "10"
+            DeleteOnTermination: true
+            VolumeType: "gp2"
+      ImageId: !Sub "${AMICode}"
+      InstanceType: !Sub "${AMIType}"
+
+  WebServerAutoScalingSG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: 4
+      MaxSize: 4
+      DesiredCapacity: 4
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PRIV-NETS"
+      LaunchConfigurationName: !Ref WebServerLaunchConfig
+      TargetGroupARNs:
+        - Ref: WebServerTG
+
+  WebServerLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: WebServerLoadBalancer
+      Subnets:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PUB-NETS"
+      SecurityGroups:
+        - Ref: WebServerLBSG
+
+  WebServerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebServerTG
+      LoadBalancerArn: !Ref WebServerLB
+      Port: 80
+      Protocol: HTTP
+
+  WebServerLR:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref WebServerTG
+      Conditions:
+        - Field: path-pattern
+          Values: [/]
+      ListenerArn: !Ref WebServerListener
+      Priority: 1
+
+  WebServerTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"
+
+  WebServerScaleUp:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref WebServerAutoScalingSG
+      Cooldown: 300
+      ScalingAdjustment: 1
+
+  WebServerScaleDown:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref WebServerAutoScalingSG
+      Cooldown: 300
+      ScalingAdjustment: -1
+  
+  BastionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+
+  BastionIamPolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: fullAccess
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "s3:*"
+            Resource: "*"
+      Roles:
+        - !Ref BastionIamRole
+
+  BastionIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref BastionIamRole
+
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG to access to bastion host
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: !Sub "${SourceIP}"
+
+  BastionServer1:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - BastionSecurityGroup
+      - BastionIamInstanceProfile
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install unzip awscli -y
+          cd /home/ubuntu
+          aws s3 cp s3://${S3BucketName}/key/${BastionSSHKey}.pem /home/ubuntu
+          chmod 400 ${BastionSSHKey}.pem
+      IamInstanceProfile: !Ref BastionIamInstanceProfile
+      SecurityGroupIds:
+        - Ref: BastionSecurityGroup
+      SubnetId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-NET"
+      ImageId: !Sub "${AMICode}"
+      InstanceType: !Sub "${AMIType}"
+      KeyName: !Sub "${BastionSSHKey}"
+
+  BastionServer1EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+
+  EIPAssociation0:
+    Type: AWS::EC2::EIPAssociation
+    DependsOn:
+      - BastionServer1
+      - BastionServer1EIP
+    Properties:
+      InstanceId:
+        Ref: BastionServer1
+      AllocationId:
+        Fn::GetAtt:
+          - BastionServer1EIP
+          - AllocationId
+
+  BastionServer2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - BastionSecurityGroup
+      - BastionIamInstanceProfile
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install unzip awscli -y
+          cd /home/ubuntu
+          aws s3 cp s3://${S3BucketName}/key/${BastionSSHKey}.pem /home/ubuntu
+          chmod 400 ${BastionSSHKey}.pem
+      IamInstanceProfile: !Ref BastionIamInstanceProfile
+      SecurityGroupIds:
+        - Ref: BastionSecurityGroup
+      SubnetId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-NET"
+      ImageId: !Sub "${AMICode}"
+      InstanceType: !Sub "${AMIType}"
+      KeyName: !Sub "${BastionSSHKey}"
+
+  BastionServer2EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+
+  EIPAssociation1:
+    Type: AWS::EC2::EIPAssociation
+    DependsOn:
+      - BastionServer2
+      - BastionServer2EIP
+    Properties:
+      InstanceId:
+        Ref: BastionServer2
+      AllocationId:
+        Fn::GetAtt:
+          - BastionServer2EIP
+          - AllocationId
+
+Outputs:
+  Website:
+    Description: The Public DNS for the Load Balancer
+    Value: !Join ["", ["http://",!GetAtt WebServerLB.DNSName]]
+    Export:
+      Name: !Sub ${EnvironmentName}-LB
+

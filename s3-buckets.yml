@@ -1,0 +1,66 @@
+Description: >
+  Mohamed Hamdy / Udacity 2023
+  CloudFormation file to create a S3 bucket for deploying a high-availability 
+  web app and allow EC2 instances to manage S3
+
+Parameters:
+  EnvironmentName:
+    Description: "An Enviroment name to tag resources"
+    Type: "String"
+
+  S3BucketName:
+    Description: Bucket which ssh key and webapp zip file placed
+    Type: String
+
+Resources:
+  AppKeyS3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${S3BucketName}"
+      AccessControl: Private
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+    DeletionPolicy: Retain
+
+  AppKeyS3Policy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AppKeyS3
+      PolicyDocument:
+        Statement:
+          - Sid: AllowStaticObjectDownload
+            Action: s3:GetObject
+            Effect: Allow
+            Resource: !Join ["", ["arn:aws:s3:::", !Ref "AppKeyS3", "/*"]]
+            Principal:
+              AWS: "*"
+          - Sid: PutObjectAccess
+            Action: s3:PutObject
+            Effect: Allow
+            Resource: !Join ["", ["arn:aws:s3:::", !Ref "AppKeyS3", "/*"]]
+            Principal:
+              AWS: "*"
+  
+  IAMRoleAppKeyS3:
+    Type: "AWS::IAM::Role"
+    Properties:
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+
+  IAMAppKeyS3InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: "IAMRoleAppKeyS3"
